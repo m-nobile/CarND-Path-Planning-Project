@@ -9,6 +9,8 @@
 #include "json.hpp"
 #include "spline.h"
 
+#include <math.h>
+
 // for convenience
 using nlohmann::json;
 using std::string;
@@ -108,24 +110,64 @@ int main() {
           }
         
           bool too_close = false; // True if too close to a car in front
+          double car_right = 0.0;
+          double car_left = 0.0;
+
+          double MAX_ACC = .224; //approx 5 (m/s^2)
+          double MAX_VEL = 49.5; //mph
         
           // Find ref_v to use
           for (int i = 0; i < sensor_fusion.size(); i++) {
-            // Check if the car is in the same lane as the ego vehicle
             float d = sensor_fusion[i][6];
-            if (d < (2+4*lane+2) && d > (2+4*lane-2)){
-              double vx = sensor_fusion[i][3];
-              double vy = sensor_fusion[i][4];
-              double check_speed = sqrt(vx*vx + vy*vy);
-              double check_car_s = sensor_fusion[i][5];
-              
-              // Calculate the check_car's future location
-              check_car_s += (double)prev_size * 0.02 * check_speed;
-              // If the check_car is within 30 meters in front, reduce ref_vel so that we don't hit it
-              if (check_car_s > car_s && (check_car_s - car_s) < 30){
-                //ref_vel = 29.5;
-                too_close = true;
-              } 
+            int car_lane = floor(d/4);
+
+            double vx = sensor_fusion[i][3];
+            double vy = sensor_fusion[i][4];
+            double check_speed = sqrt(vx*vx + vy*vy);
+            double check_car_s = sensor_fusion[i][5];
+            
+            // Calculate the check_car's future location
+            check_car_s += (double)prev_size * 0.02 * check_speed;
+            // If the check_car is within 30 meters in front, reduce ref_vel so that we don't hit it
+            if (car_lane == lane && check_car_s > car_s && (check_car_s - car_s) < 30){
+              too_close = true;
+
+              // Try to match speed of car in front
+              if ((ref_vel - check_speed) < MAX_ACC) {
+                ref_vel = check_speed;
+              } else {
+                ref_vel -= MAX_ACC;
+              }     
+            }
+
+            // Check if lane to the right of ego vehicle is open
+            bool lane_occupied = car_s - 30 < check_car_s && car_s + 30 > check_car_s;
+            if (car_lane == (lane + 1) && car_right > -1.0) {
+              if (lane_occupied) {
+                car_right = -1.0;
+              } else if (check_car_s > car_s && (check_car_s - car_s) < 50) {
+                car_right = check_speed;
+              }
+            }
+            else if (car_lane == (lane - 1) && car_left > -1.0) {
+              if (lane_occupied) {
+                car_left = -1.0;
+              } else if (check_car_s > car_s && (check_car_s - car_s) < 50) {
+                std::cout << check_car_s << " " << car_s << " " << (check_car_s - car_s) << std::endl;
+                car_left = check_speed;
+              }
+            }
+          }
+
+          
+
+          // Check if we should change lanes
+          if (too_close) {
+            std::cout << car_right << " " << car_left << " " << ref_vel << std::endl;
+            if (lane > 0 && (car_left == 0 || (car_left > car_right && car_left > ref_vel))) {
+              lane--;
+            } else if (lane < 2 && (car_right == 0 || car_right > ref_vel)) {
+              lane++;
             }
           }
         
@@ -201,14 +243,16 @@ int main() {
           double target_y = s(target_x);
           double target_dist = sqrt(target_x*target_x + target_y*target_y); // this is the d in the diagram
           double x_add_on = 0.0; // Related to the transformation (starting at zero)
+
           // Fill up the rest of path planner after filling it with previous points, will always output 50 points
           for (int i = 1; i <= 50-previous_path_x.size(); i++) {
             // Reduce speed if too close, add if no longer close
-            if (too_close) {
-              ref_vel -= .224;
-            } else if (ref_vel < 49.5) {
-              ref_vel += .224;
+            if(!too_close && ref_vel < MAX_ACC) {
+              ref_vel = MAX_ACC;
+            } else if (!too_close && ref_vel < MAX_VEL) {
+              ref_vel += MAX_ACC;
             }
+
             double N = (target_dist/(0.02*ref_vel/2.24));
             double x_point = x_add_on + target_x/N;
             double y_point = s(x_point);
